@@ -1,0 +1,15 @@
+<configuration debug="false">
+    <variable name="MX_LOG_LEVEL" value="${MX_LOG_LEVEL:-INFO}"/>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- @formatter:off -->
+            <pattern>%gray(%d{yyyy-MM-dd HH:mm:ss.SSS}) %magenta([%thread]) %cyan(%logger{30}) %highlight(%level) %msg%n</pattern>
+            <!-- @formatter:on -->
+        </encoder>
+    </appender>
+
+    <root level="${MX_LOG_LEVEL}">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
