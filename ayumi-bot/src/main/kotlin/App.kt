@@ -1,27 +1,27 @@
 package dev.deathblows.app
 
-import dev.kord.common.entity.ALL
-import dev.kord.common.entity.Permissions
-import dev.kord.gateway.Intent
-import dev.kord.gateway.Intents
-import dev.kord.gateway.NON_PRIVILEGED
-import me.jakejmattson.discordkt.dsl.bot
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.LoggerContext
+import dev.kord.common.annotation.KordVoice
 import org.slf4j.LoggerFactory
-import java.awt.Color
 
-fun main(args: Array<String>) {
-	val token = args.firstOrNull() ?: "MTQ3OTE1OTQyNDcwOTgyNDU5Mw.G4YTOp.NWC6c1qiIDfaslGI9QKKsLGoVotj-_v9Z41t-o"
-	val logger = LoggerFactory.getLogger("App")
+@KordVoice
+suspend fun main(args: Array<String>) {
+	val logLevel = System.getenv("LOG_LEVEL") ?: "INFO"
+	val loggerContext = LoggerFactory.getILoggerFactory() as LoggerContext?
+	val rootLogger: Logger =
+		loggerContext?.getLogger(Logger.ROOT_LOGGER_NAME) ?: throw IllegalStateException("Root logger not found")
+	rootLogger.setLevel(Level.toLevel(logLevel.uppercase()))
 
-	bot(token) {
-		configure {
-			theme = Color(235, 52, 103)
-			intents = Intents.NON_PRIVILEGED + Intents(Intent.Guilds)
-			defaultPermissions = Permissions.ALL
-		}
 
-		onStart {
-			logger.info("Bot is ready!")
-		}
+	val logger = LoggerFactory.getLogger("App_EntryPoint")
+
+	val ayumi = Ayumi()
+
+	try {
+		ayumi.start()
+	} catch (e: Exception) {
+		logger.error("An error occurred while starting Ayumi.", e)
 	}
 }
