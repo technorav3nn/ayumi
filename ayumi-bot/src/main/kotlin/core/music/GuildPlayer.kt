@@ -1,59 +1,83 @@
 package dev.deathblows.app.core.music
 
-import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
-import com.sedmelluq.discord.lavaplayer.track.AudioTrack
-import dev.kord.common.annotation.KordVoice
-import dev.kord.core.behavior.channel.BaseVoiceChannelBehavior
-import dev.kord.core.behavior.channel.connect
-import dev.kord.voice.AudioFrame
-import dev.kord.voice.VoiceConnection
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import dev.arbjerg.lavalink.protocol.v4.Message.EmittedEvent.TrackEndEvent.AudioTrackEndReason
+import dev.arbjerg.lavalink.protocol.v4.Track
+import dev.deathblows.app.core.ACCENT_COLOR
+import dev.kord.common.entity.MessageFlag
+import dev.kord.core.behavior.channel.createMessage
+import dev.kord.core.cache.data.UserData
+import dev.kord.core.entity.User
+import dev.kord.core.entity.channel.GuildMessageChannel
+import dev.kord.rest.builder.message.container
+import dev.kord.rest.builder.message.messageFlags
+import dev.schlaubi.lavakord.audio.Link
+import dev.schlaubi.lavakord.audio.TrackEndEvent
+import dev.schlaubi.lavakord.audio.TrackStartEvent
+import dev.schlaubi.lavakord.audio.on
+import dev.schlaubi.lavakord.audio.player.Player
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
-import java.util.*
 
-/**
- * A Guild Player instance
- */
-@OptIn(KordVoice::class, ExperimentalCoroutinesApi::class)
 class GuildPlayer(
-	val internalPlayer: AudioPlayer,
-) {
-	var queue: ArrayDeque<AudioTrack?> = ArrayDeque()
-
+	val link: Link,
+	val textChannel: GuildMessageChannel
+) : Player by link.player {
 	private val logger = LoggerFactory.getLogger(GuildPlayer::class.java)
-	private var connection: VoiceConnection? = null
+	private val queue: ArrayDeque<Track> = ArrayDeque()
+	private val queueMutex: Mutex = Mutex()
 
-	suspend fun disconnect() {
-		connection?.disconnect()
-		connection = null
-	}
+	var currentTrackRequester: UserData? = null
+	val trackRequesters: ArrayDeque<UserData> = ArrayDeque()
 
-	suspend fun connect(channel: BaseVoiceChannelBehavior) {
-		connection = channel.connect {
-			audioProvider { AudioFrame.fromData(internalPlayer.provide()?.data) }
-			selfDeaf = true
+	init {
+		on<TrackEndEvent> {
+			if (reason == AudioTrackEndReason.FINISHED || reason == AudioTrackEndReason.LOAD_FAILED || reason == AudioTrackEndReason.STOPPED || reason == AudioTrackEndReason.REPLACED) {
+				nextTrack()
+			}
+		}
+		on<TrackStartEvent> {
+			textChannel.createMessage {
+				messageFlags {
+					+MessageFlag.IsComponentsV2
+				}
+				container {
+					accentColor = ACCENT_COLOR
+					textDisplay("Now playing `${track.info.title}` by `${track.info.author}`")
+					textDisplay("-# requested by ${currentTrackRequester?.username ?: "Unknown User"}")
+				}
+			}
 		}
 	}
 
-
-	fun addTracks(tracks: List<AudioTrack>, addToFront: Boolean = false) {
-		if (addToFront) {
-			tracks.forEach { queue.addFirst(it) }
-		} else {
-			queue.addAll(tracks)
+	suspend fun enqueue(track: Track, author: User) {
+		var shouldStart = false
+		queueMutex.withLock {
+			queue.addLast(track)
+			trackRequesters.addLast(author.data)
+			shouldStart = (playingTrack == null)
 		}
-		if (internalPlayer.playingTrack == null) {
-			nextTrack()
-		}
+		if (shouldStart) nextTrack()
 	}
 
-	fun nextTrack() {
-		val track = queue.poll()
-		logger.info(track?.info?.title)
-		if (track == null) {
-			return
+	suspend fun nextTrack(): Track? {
+		val next: Pair<Track, UserData>? = queueMutex.withLock {
+			if (queue.isEmpty()) return@withLock null
+			val track = queue.removeFirst()
+			val requester = trackRequesters.removeFirst()
+			currentTrackRequester = requester
+			track to requester
 		}
 
-		internalPlayer.playTrack(track)
+		next ?: return null
+		val (track, _) = next
+		playTrack(track) { noReplace = false }
+		return track
 	}
+
+	suspend fun skip() {
+		this.stopTrack()
+	}
+
+
 }

@@ -1,152 +1,153 @@
 package dev.deathblows.app.core.music
 
-import com.sedmelluq.discord.lavaplayer.player.AudioLoadResultHandler
-import com.sedmelluq.discord.lavaplayer.player.AudioPlayer
-import com.sedmelluq.discord.lavaplayer.player.DefaultAudioPlayerManager
-import com.sedmelluq.discord.lavaplayer.source.AudioSourceManagers
-import com.sedmelluq.discord.lavaplayer.tools.FriendlyException
-import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist
-import com.sedmelluq.discord.lavaplayer.track.AudioTrack
+import com.github.michaelbull.result.Err
+import com.github.michaelbull.result.Ok
+import com.github.michaelbull.result.Result
+import dev.arbjerg.lavalink.protocol.v4.LoadResult
+import dev.deathblows.app.core.ERROR_COLOR
+import dev.deathblows.app.core.WARNING_COLOR
 import dev.kord.common.annotation.KordVoice
-import dev.kord.common.entity.ButtonStyle
 import dev.kord.common.entity.MessageFlag
-import dev.kord.common.entity.SeparatorSpacingSize
 import dev.kord.common.entity.Snowflake
 import dev.kord.core.Kord
 import dev.kord.core.behavior.interaction.respondEphemeral
 import dev.kord.core.entity.VoiceState
-import dev.kord.core.entity.interaction.GuildChatInputCommandInteraction
-import dev.kord.rest.builder.component.actionRow
+import dev.kord.core.entity.channel.GuildMessageChannel
+import dev.kord.core.entity.interaction.ActionInteraction
+import dev.kord.core.entity.interaction.GuildInteraction
 import dev.kord.rest.builder.message.container
 import dev.kord.rest.builder.message.messageFlags
-import dev.lavalink.youtube.YoutubeAudioSourceManager
-import dev.lavalink.youtube.YoutubeSourceOptions
-import dev.lavalink.youtube.clients.AndroidVrWithThumbnail
-import kotlinx.coroutines.suspendCancellableCoroutine
+import dev.schlaubi.lavakord.LavaKord
+import dev.schlaubi.lavakord.audio.Link
+import dev.schlaubi.lavakord.kord.getLink
+import dev.schlaubi.lavakord.kord.lavakord
+import dev.schlaubi.lavakord.plugins.lavasrc.LavaSrc
+import dev.schlaubi.lavakord.rest.loadItem
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import java.util.concurrent.ConcurrentHashMap
+
+enum class CreatePlayerError {
+	NotInVoiceChannel,
+	FailedToConnect,
+}
 
 @OptIn(KordVoice::class)
 @KordVoice
 object MusicManager {
-	val logger: Logger = LoggerFactory.getLogger(MusicManager::class.java)
-	val playerManager = DefaultAudioPlayerManager()
-	val players: MutableMap<Snowflake, GuildPlayer> = mutableMapOf()
+	val players: ConcurrentHashMap<Snowflake, GuildPlayer> = ConcurrentHashMap()
+	private val playersMutex = Mutex()
 
+	private val logger: Logger = LoggerFactory.getLogger(MusicManager::class.java)
 	private lateinit var kord: Kord
+	lateinit var lavakord: LavaKord
 
 	fun initialize(kord: Kord) {
-		val options = YoutubeSourceOptions()
-			.setAllowSearch(true)
-			.setRemoteCipher("https://cipher.kikkia.dev/", null, "AyumiBot/0.1.0 (tysm for hosting this!)");
-
-		val youtubeAudioSourceManager = YoutubeAudioSourceManager(options, AndroidVrWithThumbnail())
-		
-
-		playerManager.registerSourceManager(youtubeAudioSourceManager)
-		AudioSourceManagers.registerRemoteSources(playerManager);
-		AudioSourceManagers.registerLocalSource(playerManager)
-
-		logger.info("Music Manager initialized")
 		this.kord = kord
-	}
-
-	suspend fun createPlayer(guildId: Snowflake, voiceState: VoiceState) = runCatching {
-		val player = playerManager.createPlayer()
-
-		val channel = voiceState.getChannelOrNull() ?: throw IllegalStateException("User is not in a voice channel")
-
-		val guildPlayer = GuildPlayer(player)
-
-		val trackScheduler = TrackScheduler(guildPlayer)
-		player.addListener(trackScheduler)
-		players[guildId] = guildPlayer
-
-		logger.info("Created new GuildPlayer for guild ${guildId.value}")
-		guildPlayer.connect(channel)
-
-		return@runCatching guildPlayer
-	}
-
-	suspend fun getPlayerOrNull(interaction: GuildChatInputCommandInteraction): GuildPlayer? {
-		val player = players[interaction.guildId]
-		if (player != null) {
-			return player
+		lavakord = kord.lavakord {
+			plugins {
+				install(LavaSrc)
+			}
 		}
-		val voiceState = interaction.user.asMember().getVoiceStateOrNull()
-		if (voiceState == null) {
-			interaction.respondEphemeral {
-				messageFlags {
-					+MessageFlag.IsComponentsV2
-				}
-				container {
-					textDisplay("**you need to be in a voice channel to use this command!**")
-					separator(SeparatorSpacingSize.Small)
-					actionRow {
-						interactionButton(ButtonStyle.Secondary, "try-again") {
-							label = "try again!"
+		lavakord.addNode("ws://localhost:2333", "youshallnotpass")
+		logger.info("Connected to LavaLink node at ws://localhost:2333")
+	}
+
+	fun hasPlayer(guildId: Snowflake): Boolean {
+		return players.containsKey(guildId)
+	}
+
+	suspend fun <T> getPlayer(interaction: T): GuildPlayer?
+			where T : ActionInteraction, T : GuildInteraction {
+		players[interaction.guildId]?.let { return it }
+		playersMutex.withLock {
+			val voiceState = interaction.user.asMember().getVoiceStateOrNull()
+			val (newPlayer, error) = createPlayer(interaction.guildId, voiceState, interaction.channel.asChannel())
+			if (error != null) {
+				when (error) {
+					CreatePlayerError.NotInVoiceChannel -> {
+						interaction.respondEphemeral {
+							messageFlags {
+								+MessageFlag.IsComponentsV2
+							}
+							container {
+								accentColor = WARNING_COLOR
+								textDisplay("You must be in a voice channel to use this command!")
+							}
+						}
+					}
+
+					CreatePlayerError.FailedToConnect -> {
+						interaction.respondEphemeral {
+							messageFlags {
+								+MessageFlag.IsComponentsV2
+							}
+							container {
+								accentColor = ERROR_COLOR
+								textDisplay("Failed to connect to the voice channel! Please try again later.")
+							}
 						}
 					}
 				}
+				return null
 			}
-			return null
+
+			return newPlayer
 		}
-		return createPlayer(interaction.guildId, voiceState).getOrThrow()
 	}
 
-	suspend fun findTracks(query: String, search: Boolean = true): List<AudioTrack> =
-		suspendCancellableCoroutine {
-			this.playerManager.loadItem("${if (search) "ytsearch: " else ""}$query", object : AudioLoadResultHandler {
+	suspend fun createPlayer(
+		guildId: Snowflake,
+		voiceState: VoiceState?,
+		textChannel: GuildMessageChannel
+	): Result<GuildPlayer, CreatePlayerError> {
+		val channelId = voiceState?.channelId
+		val link = lavakord.getLink(guildId)
 
-				override fun trackLoaded(track: AudioTrack) {
-					logger.info(
-						"Single track loaded for $query, ${track.info.uri}"
-					)
-					it.resume(listOf(track))
-				}
-
-				override fun playlistLoaded(playlist: AudioPlaylist) {
-					logger.info("Playlist loaded for query $query, ${playlist.tracks.size} tracks")
-					it.resume(playlist.tracks)
-				}
-
-				override fun noMatches() {
-					logger.warn("No matches found for query $query")
-					it.resumeWithException(RuntimeException("No tracks loaded"))
-				}
-
-				override fun loadFailed(exception: FriendlyException?) {
-					logger.error("Failed to load track for query $query", exception)
-					it.resumeWithException(exception ?: RuntimeException("Unknown exception"))
-				}
-			})
+		if (channelId == null) {
+			return Err(CreatePlayerError.NotInVoiceChannel)
 		}
+
+		link.connectAudio(channelId.value)
+		val player = GuildPlayer(link, textChannel)
+		players[guildId] = player
+		return Ok(player)
+	}
+
+	suspend fun destroyPlayer(guildId: Snowflake) = playersMutex.withLock {
+		players.remove(guildId)?.let { player ->
+			player.link.disconnectAudio()
+			player.link.destroy()
+		}
+	}
+
+	suspend fun search(query: String, link: Link, mustBeConnected: Boolean = true): Result<LoadResult, SearchError> {
+		val search = if (query.startsWith("http")) {
+			query
+		} else {
+			"ytsearch:$query"
+		}
+
+		// okay to check CONNECTING, since it's not gonna stop track loading
+		if (mustBeConnected && link.state != Link.State.CONNECTED && link.state != Link.State.CONNECTING) {
+			return Err(SearchError.NotConnected)
+		}
+
+		return when (val item = link.loadItem(search)) {
+			is LoadResult.TrackLoaded -> Ok(item)
+			is LoadResult.PlaylistLoaded -> Ok(item)
+			is LoadResult.SearchResult -> Ok(item)
+			is LoadResult.NoMatches -> Err(SearchError.NoMatches)
+			is LoadResult.LoadFailed -> Err(SearchError.LoadFailed)
+		}
+	}
+
 }
 
-suspend fun DefaultAudioPlayerManager.playTrack(query: String, player: AudioPlayer): AudioTrack {
-	val track = suspendCancellableCoroutine<AudioTrack> {
-		this.loadItem(query, object : AudioLoadResultHandler {
-			override fun trackLoaded(track: AudioTrack) {
-				it.resume(track)
-			}
-
-			override fun playlistLoaded(playlist: AudioPlaylist) {
-				it.resume(playlist.tracks.first())
-			}
-
-			override fun noMatches() {
-				TODO()
-			}
-
-			override fun loadFailed(exception: FriendlyException?) {
-				TODO()
-			}
-		})
-	}
-
-	player.playTrack(track)
-
-	return track
+enum class SearchError {
+	NotConnected,
+	NoMatches,
+	LoadFailed,
 }
