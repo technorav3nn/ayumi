@@ -14,7 +14,6 @@ suspend fun main(args: Array<String>) {
 		loggerContext?.getLogger(Logger.ROOT_LOGGER_NAME) ?: throw IllegalStateException("Root logger not found")
 	rootLogger.setLevel(Level.toLevel(logLevel.uppercase()))
 
-
 	val logger = LoggerFactory.getLogger("App_EntryPoint")
 
 	val ayumi = Ayumi()

@@ -3,6 +3,8 @@ package dev.deathblows.app.core.commands
 import dev.kord.common.entity.ApplicationCommandType
 import dev.kord.common.entity.Snowflake
 import dev.kord.core.Kord
+import dev.kord.core.entity.interaction.ComponentInteraction
+import dev.kord.core.entity.interaction.GuildComponentInteraction
 import dev.kord.rest.builder.interaction.*
 import io.github.classgraph.ClassGraph
 import kotlinx.coroutines.flow.launchIn
@@ -13,6 +15,7 @@ val DEV_GUILD_ID = Snowflake(956642632090677268)
 
 object CommandManager {
 	val commands = mutableListOf<Command>()
+	val interactionHandlers = mutableListOf<Pair<List<String>, suspend (interaction: ComponentInteraction) -> Unit>>()
 
 	// use a map for faster retrieval
 	val nameAndRootToCommand = mutableMapOf<Pair<String, String?>, Command>()
@@ -23,7 +26,6 @@ object CommandManager {
 	private val logger = LoggerFactory.getLogger(CommandManager::class.java)
 	private val isProd = System.getenv("AYUMI_ENV") == "prod"
 	private val shouldRegisterInDev = !isProd && System.getenv("REGISTER") != null
-
 
 	suspend fun initialize(kord: Kord) {
 		val scanned = ClassGraph().acceptPackages(COMMAND_PACKAGE).scan()
@@ -38,7 +40,22 @@ object CommandManager {
 		// added ( and ) to use Kotlin's forEach, not java.util.Map's
 		classes.forEach { (group, infos) ->
 			val cmds = infos.map { it.loadClass().getDeclaredConstructor().newInstance() as Command }
+
 			cmds.forEach {
+				val customIds = it.componentCustomIds
+				if (customIds.isNotEmpty()) {
+					logger.debug("Registering component custom IDs for command: {}, IDs: {}", it.name, customIds)
+					interactionHandlers.add(
+						Pair(customIds) { interaction ->
+							logger.debug(
+								"Handling interaction for command: {}, custom ID: {}",
+								it.name,
+								interaction.componentId
+							)
+							it.onExternalInteractionRun(interaction as GuildComponentInteraction)
+						}
+					)
+				}
 				addCommand(it)
 			}
 
@@ -60,24 +77,22 @@ object CommandManager {
 		}
 
 		// now we register the commands
-		commandsToRegister.forEach { _ ->
-			if (shouldRegisterInDev) {
-				logger.info("Registering commands...")
-				kord.createGuildApplicationCommands(DEV_GUILD_ID) {
-					this@CommandManager.commandsToRegister
-						.forEach { builder ->
-							builder(this)
-						}
-				}.launchIn(kord)
-			} else {
-				logger.info("Registering global commands...")
-				kord.createGlobalApplicationCommands {
-					this@CommandManager.commandsToRegister
-						.forEach { builder ->
-							builder(this)
-						}
-				}.launchIn(kord)
-			}
+		if (shouldRegisterInDev) {
+			logger.info("Registering commands...")
+			kord.createGuildApplicationCommands(DEV_GUILD_ID) {
+				this@CommandManager.commandsToRegister
+					.forEach { builder ->
+						builder(this)
+					}
+			}.launchIn(kord)
+		} else {
+			logger.info("Registering global commands...")
+			kord.createGlobalApplicationCommands {
+				this@CommandManager.commandsToRegister
+					.forEach { builder ->
+						builder(this)
+					}
+			}.launchIn(kord)
 		}
 
 	}
